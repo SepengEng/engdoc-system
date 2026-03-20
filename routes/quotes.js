@@ -1,10 +1,6 @@
 const express = require("express");
 const multer = require("multer");
-const fs = require("fs");
-const path = require("path");
-const PDFDocument = require("pdfkit");
 const db = require("../db/connection");
-const { buildDocumentText } = require("../services/aiDocumentGenerator");
 const { extractText } = require("../services/externalDocumentService");
 
 const router = express.Router();
@@ -18,207 +14,114 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage });
 
-function sanitizeFileName(text) {
-  return String(text)
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-zA-Z0-9-_ ]/g, "")
-    .trim()
-    .replace(/\s+/g, "_");
-}
-
-function createPdf(filePath, title, content) {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 50 });
-    const stream = fs.createWriteStream(filePath);
-
-    doc.pipe(stream);
-    doc.fontSize(18).text(title);
-    doc.moveDown();
-    doc.fontSize(12).text(content, { lineGap: 4 });
-    doc.end();
-
-    stream.on("finish", resolve);
-    stream.on("error", reject);
-  });
-}
-
-router.get("/types", (req, res) => {
-  db.all(`SELECT * FROM document_types ORDER BY id`, [], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(rows);
-  });
-});
-
-router.get("/", (req, res) => {
-  db.all(
-    `
-    SELECT
-      d.*,
-      c.name AS client_name,
-      dt.name AS document_type
-    FROM documents d
-    JOIN clients c ON c.id = d.client_id
-    JOIN document_types dt ON dt.id = d.document_type_id
-    ORDER BY d.id DESC
-    `,
-    [],
-    (err, docs) => {
-      if (err) return res.status(500).json({ error: err.message });
-
-      if (!docs.length) return res.json([]);
-
-      const ids = docs.map((d) => d.id);
-
-      db.all(
-        `
-        SELECT * FROM document_attachments
-        WHERE document_id IN (${ids.map(() => "?").join(",")})
-        `,
-        ids,
-        (err2, attachments) => {
-          if (err2) return res.status(500).json({ error: err2.message });
-
-          const result = docs.map((doc) => ({
-            ...doc,
-            attachments: attachments.filter((a) => a.document_id === doc.id)
-          }));
-
-          res.json(result);
-        }
-      );
-    }
-  );
-});
-
-router.post("/", upload.array("files", 20), async (req, res) => {
+router.get("/", async (req, res) => {
   try {
-    const {
-      client_id,
-      document_type_id,
-      project_name,
-      value,
-      status,
-      description
-    } = req.body;
+    const quotesResult = await db.query(`
+      SELECT q.*, c.name AS client_name
+      FROM quotes q
+      JOIN clients c ON c.id = q.client_id
+      ORDER BY q.id DESC
+    `);
 
-    if (!client_id || !document_type_id || !project_name) {
-      return res.status(400).json({
-        error: "client_id, document_type_id e project_name são obrigatórios"
-      });
-    }
+    const attachmentsResult = await db.query(`
+      SELECT * FROM quote_attachments ORDER BY id DESC
+    `);
 
-    db.run(
-      `
-      INSERT INTO documents (
-        client_id,
-        document_type_id,
-        project_name,
-        value,
-        status,
-        description
-      )
-      VALUES (?, ?, ?, ?, ?, ?)
-      `,
-      [
-        client_id,
-        document_type_id,
-        project_name,
-        value || null,
-        status || "pendente",
-        description || null
-      ],
-      async function (err) {
-        if (err) return res.status(500).json({ error: err.message });
+    const quotes = quotesResult.rows.map((quote) => ({
+      ...quote,
+      attachments: attachmentsResult.rows.filter((a) => a.quote_id === quote.id)
+    }));
 
-        const documentId = this.lastID;
-        const files = req.files || [];
-
-        for (const file of files) {
-          const extractedText = await extractText(file.path, file.mimetype);
-
-          await new Promise((resolve, reject) => {
-            db.run(
-              `
-              INSERT INTO document_attachments (
-                document_id,
-                original_file_name,
-                stored_file_path,
-                mime_type,
-                extracted_text
-              )
-              VALUES (?, ?, ?, ?, ?)
-              `,
-              [
-                documentId,
-                file.originalname,
-                file.path,
-                file.mimetype,
-                extractedText
-              ],
-              (insertErr) => {
-                if (insertErr) reject(insertErr);
-                else resolve();
-              }
-            );
-          });
-        }
-
-        res.status(201).json({
-          message: "Documento criado com sucesso",
-          documentId
-        });
-      }
-    );
+    res.json(quotes);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-router.post("/generate-ai", async (req, res) => {
+router.post("/", upload.array("files", 20), async (req, res) => {
   try {
-    const {
-      client_id,
-      document_type_id,
-      project_name,
-      value,
-      description
-    } = req.body;
+    const { client_id, project_name, value, status, description } = req.body;
 
-    if (!client_id || !document_type_id || !project_name) {
-      return res.status(400).json({
-        error: "Dados obrigatórios faltando"
-      });
+    if (!client_id || !project_name) {
+      return res.status(400).json({ error: "client_id e project_name são obrigatórios" });
     }
 
-    db.get(`SELECT * FROM clients WHERE id = ?`, [client_id], (err, client) => {
-      if (!client) return res.status(404).json({ error: "Cliente não encontrado" });
+    const quoteResult = await db.query(
+      `
+      INSERT INTO quotes (client_id, project_name, value, status, description)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING id
+      `,
+      [client_id, project_name, value || null, status || "negociacao", description || null]
+    );
 
-      db.get(`SELECT * FROM document_types WHERE id = ?`, [document_type_id], async (err2, type) => {
-        if (!type) return res.status(404).json({ error: "Tipo não encontrado" });
+    const quoteId = quoteResult.rows[0].id;
+    const files = req.files || [];
 
-        const text = buildDocumentText({
-          client,
-          documentType: type,
-          projectName: project_name,
-          value,
-          description
-        });
+    for (const file of files) {
+      const extractedText = await extractText(file.path, file.mimetype);
 
-        const baseName = sanitizeFileName(`${project_name}_${Date.now()}`);
+      await db.query(
+        `
+        INSERT INTO quote_attachments (
+          quote_id,
+          original_file_name,
+          stored_file_path,
+          mime_type,
+          extracted_text
+        )
+        VALUES ($1, $2, $3, $4, $5)
+        `,
+        [quoteId, file.originalname, file.path, file.mimetype, extractedText]
+      );
+    }
 
-        const txtPath = path.join(__dirname, "..", "generated/txt", `${baseName}.txt`);
-        const pdfPath = path.join(__dirname, "..", "generated/pdf", `${baseName}.pdf`);
+    res.status(201).json({
+      message: "Cotação criada com sucesso",
+      quoteId
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-        fs.writeFileSync(txtPath, text, "utf8");
-        await createPdf(pdfPath, project_name, text);
+router.post("/:id/win", async (req, res) => {
+  try {
+    const quoteId = req.params.id;
 
-        res.json({
-          text,
-          txt: `/generated/txt/${baseName}.txt`,
-          pdf: `/generated/pdf/${baseName}.pdf`
-        });
-      });
+    const quoteResult = await db.query(
+      `SELECT * FROM quotes WHERE id = $1 LIMIT 1`,
+      [quoteId]
+    );
+
+    const quote = quoteResult.rows[0];
+
+    if (!quote) {
+      return res.status(404).json({ error: "Cotação não encontrada" });
+    }
+
+    const workResult = await db.query(
+      `
+      INSERT INTO works (client_id, name, status, notes)
+      VALUES ($1, $2, $3, $4)
+      RETURNING id
+      `,
+      [
+        quote.client_id,
+        quote.project_name,
+        "ativa",
+        `Obra criada automaticamente a partir da cotação #${quote.id}`
+      ]
+    );
+
+    await db.query(
+      `UPDATE quotes SET status = 'aprovada' WHERE id = $1`,
+      [quoteId]
+    );
+
+    res.json({
+      message: "Cotação convertida em obra com sucesso",
+      workId: workResult.rows[0].id
     });
   } catch (error) {
     res.status(500).json({ error: error.message });

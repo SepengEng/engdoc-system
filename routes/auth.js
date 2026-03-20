@@ -5,17 +5,20 @@ const db = require("../db/connection");
 
 const router = express.Router();
 
-router.post("/login", (req, res) => {
-  const { email, password } = req.body;
+router.post("/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
 
-  if (!email || !password) {
-    return res.status(400).json({ error: "Email e senha são obrigatórios" });
-  }
-
-  db.get(`SELECT * FROM users WHERE email = ?`, [email], async (err, user) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email e senha são obrigatórios" });
     }
+
+    const result = await db.query(
+      `SELECT * FROM users WHERE email = $1 LIMIT 1`,
+      [email]
+    );
+
+    const user = result.rows[0];
 
     if (!user) {
       return res.status(401).json({ error: "Usuário não encontrado" });
@@ -47,7 +50,9 @@ router.post("/login", (req, res) => {
         role: user.role
       }
     });
-  });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 module.exports = router;

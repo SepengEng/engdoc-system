@@ -3,66 +3,51 @@ const db = require("../db/connection");
 
 const router = express.Router();
 
-router.get("/", (req, res) => {
-  const search = (req.query.search || "").trim();
-  const searchValue = `%${search}%`;
+router.get("/", async (req, res) => {
+  try {
+    const search = req.query.search || "";
+    const searchValue = `%${search}%`;
 
-  db.all(
-    `
-    SELECT *
-    FROM clients
-    WHERE name LIKE ? OR category LIKE ? OR city LIKE ?
-    ORDER BY id DESC
-    `,
-    [searchValue, searchValue, searchValue],
-    (err, rows) => {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
+    const result = await db.query(
+      `
+      SELECT *
+      FROM clients
+      WHERE name ILIKE $1 OR category ILIKE $1 OR city ILIKE $1
+      ORDER BY id DESC
+      `,
+      [searchValue]
+    );
 
-      res.json(rows);
-    }
-  );
-});
-
-router.get("/:id", (req, res) => {
-  db.get(`SELECT * FROM clients WHERE id = ?`, [req.params.id], (err, row) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-
-    if (!row) {
-      return res.status(404).json({ error: "Cliente não encontrado" });
-    }
-
-    res.json(row);
-  });
-});
-
-router.post("/", (req, res) => {
-  const { name, category, contact_email, phone, city, notes } = req.body;
-
-  if (!name || !category) {
-    return res.status(400).json({ error: "name e category são obrigatórios" });
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
+});
 
-  db.run(
-    `
-    INSERT INTO clients (name, category, contact_email, phone, city, notes)
-    VALUES (?, ?, ?, ?, ?, ?)
-    `,
-    [name, category, contact_email || null, phone || null, city || null, notes || null],
-    function (err) {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
+router.post("/", async (req, res) => {
+  try {
+    const { name, category, contact_email, phone, city, notes } = req.body;
 
-      res.status(201).json({
-        message: "Cliente criado com sucesso",
-        clientId: this.lastID
-      });
+    if (!name || !category) {
+      return res.status(400).json({ error: "name e category são obrigatórios" });
     }
-  );
+
+    const result = await db.query(
+      `
+      INSERT INTO clients (name, category, contact_email, phone, city, notes)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id
+      `,
+      [name, category, contact_email || null, phone || null, city || null, notes || null]
+    );
+
+    res.status(201).json({
+      message: "Cliente criado com sucesso",
+      clientId: result.rows[0].id
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 module.exports = router;

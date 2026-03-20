@@ -43,60 +43,41 @@ function createPdf(filePath, title, content) {
   });
 }
 
-router.get("/types", (req, res) => {
-  db.all("SELECT * FROM document_types ORDER BY id", [], (err, rows) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    res.json(rows);
-  });
+router.get("/types", async (req, res) => {
+  try {
+    const result = await db.query(`SELECT * FROM document_types ORDER BY id`);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-router.get("/", (req, res) => {
-  db.all(
-    `
-    SELECT
-      d.*,
-      c.name AS client_name,
-      dt.name AS document_type
-    FROM documents d
-    JOIN clients c ON c.id = d.client_id
-    JOIN document_types dt ON dt.id = d.document_type_id
-    ORDER BY d.id DESC
-    `,
-    [],
-    (err, docs) => {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
+router.get("/", async (req, res) => {
+  try {
+    const docsResult = await db.query(`
+      SELECT
+        d.*,
+        c.name AS client_name,
+        dt.name AS document_type
+      FROM documents d
+      JOIN clients c ON c.id = d.client_id
+      JOIN document_types dt ON dt.id = d.document_type_id
+      ORDER BY d.id DESC
+    `);
 
-      if (!docs.length) {
-        return res.json([]);
-      }
+    const attachmentsResult = await db.query(`
+      SELECT * FROM document_attachments ORDER BY id DESC
+    `);
 
-      const ids = docs.map((d) => d.id);
+    const docs = docsResult.rows.map((doc) => ({
+      ...doc,
+      attachments: attachmentsResult.rows.filter((a) => a.document_id === doc.id)
+    }));
 
-      db.all(
-        `
-        SELECT * FROM document_attachments
-        WHERE document_id IN (${ids.map(() => "?").join(",")})
-        `,
-        ids,
-        (err2, attachments) => {
-          if (err2) {
-            return res.status(500).json({ error: err2.message });
-          }
-
-          const result = docs.map((doc) => ({
-            ...doc,
-            attachments: attachments.filter((a) => a.document_id === doc.id)
-          }));
-
-          res.json(result);
-        }
-      );
-    }
-  );
+    res.json(docs);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 router.post("/", upload.array("files", 20), async (req, res) => {
@@ -116,7 +97,7 @@ router.post("/", upload.array("files", 20), async (req, res) => {
       });
     }
 
-    db.run(
+    const docResult = await db.query(
       `
       INSERT INTO documents (
         client_id,
@@ -126,7 +107,8 @@ router.post("/", upload.array("files", 20), async (req, res) => {
         status,
         description
       )
-      VALUES (?, ?, ?, ?, ?, ?)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id
       `,
       [
         client_id,
@@ -135,51 +117,34 @@ router.post("/", upload.array("files", 20), async (req, res) => {
         value || null,
         status || "pendente",
         description || null
-      ],
-      async function (err) {
-        if (err) {
-          return res.status(500).json({ error: err.message });
-        }
-
-        const documentId = this.lastID;
-        const files = req.files || [];
-
-        for (const file of files) {
-          const extractedText = await extractText(file.path, file.mimetype);
-
-          await new Promise((resolve, reject) => {
-            db.run(
-              `
-              INSERT INTO document_attachments (
-                document_id,
-                original_file_name,
-                stored_file_path,
-                mime_type,
-                extracted_text
-              )
-              VALUES (?, ?, ?, ?, ?)
-              `,
-              [
-                documentId,
-                file.originalname,
-                file.path,
-                file.mimetype,
-                extractedText
-              ],
-              (insertErr) => {
-                if (insertErr) reject(insertErr);
-                else resolve();
-              }
-            );
-          });
-        }
-
-        res.status(201).json({
-          message: "Documento criado com sucesso",
-          documentId
-        });
-      }
+      ]
     );
+
+    const documentId = docResult.rows[0].id;
+    const files = req.files || [];
+
+    for (const file of files) {
+      const extractedText = await extractText(file.path, file.mimetype);
+
+      await db.query(
+        `
+        INSERT INTO document_attachments (
+          document_id,
+          original_file_name,
+          stored_file_path,
+          mime_type,
+          extracted_text
+        )
+        VALUES ($1, $2, $3, $4, $5)
+        `,
+        [documentId, file.originalname, file.path, file.mimetype, extractedText]
+      );
+    }
+
+    res.status(201).json({
+      message: "Documento criado com sucesso",
+      documentId
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -196,51 +161,48 @@ router.post("/generate-ai", async (req, res) => {
     } = req.body;
 
     if (!client_id || !document_type_id || !project_name) {
-      return res.status(400).json({
-        error: "Dados obrigatórios faltando"
-      });
+      return res.status(400).json({ error: "Dados obrigatórios faltando" });
     }
 
-    db.get("SELECT * FROM clients WHERE id = ?", [client_id], (err, client) => {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
+    const clientResult = await db.query(
+      `SELECT * FROM clients WHERE id = $1 LIMIT 1`,
+      [client_id]
+    );
+    const typeResult = await db.query(
+      `SELECT * FROM document_types WHERE id = $1 LIMIT 1`,
+      [document_type_id]
+    );
 
-      if (!client) {
-        return res.status(404).json({ error: "Cliente não encontrado" });
-      }
+    const client = clientResult.rows[0];
+    const type = typeResult.rows[0];
 
-      db.get("SELECT * FROM document_types WHERE id = ?", [document_type_id], async (err2, type) => {
-        if (err2) {
-          return res.status(500).json({ error: err2.message });
-        }
+    if (!client) {
+      return res.status(404).json({ error: "Cliente não encontrado" });
+    }
 
-        if (!type) {
-          return res.status(404).json({ error: "Tipo não encontrado" });
-        }
+    if (!type) {
+      return res.status(404).json({ error: "Tipo não encontrado" });
+    }
 
-        const text = buildDocumentText({
-          client,
-          documentType: type,
-          projectName: project_name,
-          value,
-          description
-        });
+    const text = buildDocumentText({
+      client,
+      documentType: type,
+      projectName: project_name,
+      value,
+      description
+    });
 
-        const baseName = sanitizeFileName(`${project_name}_${Date.now()}`);
+    const baseName = sanitizeFileName(`${project_name}_${Date.now()}`);
+    const txtPath = path.join(__dirname, "..", "generated", "txt", `${baseName}.txt`);
+    const pdfPath = path.join(__dirname, "..", "generated", "pdf", `${baseName}.pdf`);
 
-        const txtPath = path.join(__dirname, "..", "generated", "txt", `${baseName}.txt`);
-        const pdfPath = path.join(__dirname, "..", "generated", "pdf", `${baseName}.pdf`);
+    fs.writeFileSync(txtPath, text, "utf8");
+    await createPdf(pdfPath, project_name, text);
 
-        fs.writeFileSync(txtPath, text, "utf8");
-        await createPdf(pdfPath, project_name, text);
-
-        res.json({
-          text,
-          txt: `/generated/txt/${baseName}.txt`,
-          pdf: `/generated/pdf/${baseName}.pdf`
-        });
-      });
+    res.json({
+      text,
+      txt: `/generated/txt/${baseName}.txt`,
+      pdf: `/generated/pdf/${baseName}.pdf`
     });
   } catch (error) {
     res.status(500).json({ error: error.message });

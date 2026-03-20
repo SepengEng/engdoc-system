@@ -1,14 +1,12 @@
-const sqlite3 = require("sqlite3").verbose();
-const path = require("path");
+const { Pool } = require("pg");
 
-const dbPath = path.join(__dirname, "..", "database.db");
+const isProduction = process.env.NODE_ENV === "production";
 
-const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) {
-    console.error("Erro ao conectar no banco:", err.message);
-  } else {
-    console.log("Banco conectado com sucesso.");
-  }
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: isProduction
+    ? { rejectUnauthorized: false }
+    : false
 });
 
-module.exports = db;
+module.exports = pool;
