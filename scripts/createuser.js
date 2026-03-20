@@ -2,29 +2,37 @@ require("dotenv").config();
 const bcrypt = require("bcryptjs");
 const pool = require("../db/connection");
 
-async function createUser() {
-  const name = "Admin";
-  const email = "admin@engdoc.com";
-  const password = "123456";
-  const role = "admin";
+const users = [
+  {
+    name: "Admin",
+    email: "admin@engdoc.com",
+    password: "123456",
+    role: "admin"
+  }
+];
 
+async function createUsers() {
   try {
-    const hash = await bcrypt.hash(password, 10);
+    for (const user of users) {
+      const hash = await bcrypt.hash(user.password, 10);
 
-    await pool.query(
-      `
-      INSERT INTO users (name, email, password_hash, role)
-      VALUES ($1, $2, $3, $4)
-      `,
-      [name, email, hash, role]
-    );
+      await pool.query(
+        `
+        INSERT INTO users (name, email, password_hash, role)
+        VALUES ($1, $2, $3, $4)
+        `,
+        [user.name, user.email, hash, user.role]
+      );
 
-    console.log("Usuário criado com sucesso 🚀");
+      console.log(`Usuário ${user.email} criado ✅`);
+    }
+
+    console.log("Todos usuários criados 🚀");
   } catch (err) {
-    console.error("Erro ao criar usuário:", err.message);
+    console.error("Erro:", err.message);
   }
 
   process.exit();
 }
 
-createUser();
+createUsers();
